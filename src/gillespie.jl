@@ -1,5 +1,25 @@
 using Parameters
 
+mutable struct solution{T<:Number}
+
+    current_population::Vector{Int}
+    current_time::T
+    population_array::Vector{Array{Int}}
+    time_array::Vector{T}
+
+end
+
+struct gillespie_parameters{T<:Number}
+    max_events::Int                 # Maximum number of events that can occur
+    final_time::Number              # Final time of simulation
+    store_array::Bool               # Check whether we fill the pop/time Array
+    initial_population::Vector{Int}
+    initial_time::T
+    sto_mat::Vector{Vector{Int}}    # How does population change?
+    compute_rates::Function         # output should be same length as sto_mat
+    params::Vector{Number}          # To be fed into compute_rates function
+end
+
 function plotfig(sol::solution,stride::Int=1)
 
     plot(
@@ -20,36 +40,13 @@ function plotfig!(sol::solution,stride::Int=1)
 
 end
 
-mutable struct solution{T<:Number}
+function compute_rates(current_time,current_population,params::Vector{Number})
 
-    current_population::Vector{Int}
-    current_time::T
-    population_array::Vector{Array{Int}}
-    time_array::Vector{T}
+    λ0,μ0,K0, σ = params;
 
-end
-
-struct gillespie_parameters{T<:Number}
-    max_events::Int                 # Maximum number of events that can occur
-    final_time::Number              # Final time of simulation
-    store_array::Bool               # Check whether we fill the pop/time Array
-    initial_population::Vector{Int}
-    initial_time::T
-    sto_mat::Vector{Vector{Int}}    # How does population change?
-    # compute_rates::Function         # output should be same length as sto_mat
-end
-
-# struct gillespie_computations
-
-
-
-# end
-
-function compute_rates(current_time,current_population)#,rate_params)
-
-    λ = 0.2
-    μ = 0.1
-    K = 1000
+    λ = λ0
+    μ = μ0
+    K = K0*(1.0 + σ*sin(current_time) )
 
     return λ*current_population[1]*(1.0 - current_population[1]/K), μ*current_population[1]
 
@@ -103,11 +100,12 @@ function run_gillespie(parameters::gillespie_parameters)
         # Compute population rates
         rates = compute_rates(current_time,current_population)#,rate_params)
 
-        tau, which_event = find_event(rates)
-
-        if which_event == nothing
+        # Zero propagation
+        if sum(rates) == 0
             break
         end
+
+        tau, which_event = find_event(rates)
 
         # update time and population
         current_time += tau
