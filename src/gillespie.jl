@@ -1,14 +1,14 @@
 module Gillespie
 
-using Parameters, Plots
+using Plots
 
-export Solution, GillespieParameters,simulate
+export Solution,GillespieParameters,simulate, simulate_single_event,GillespieProblem
 
 mutable struct Solution{S,T<:Number,U}
 
     current_population::S
     current_time::T
-    population_array::U  #Vector{Array{Int}}
+    population_array::U
     time_array::Vector{T}
 
 end
@@ -41,27 +41,55 @@ struct MonteCarloProblem
     p::GillespieProblem
 end
 
+"Get initial time from GillespieProblem."
+t₀(p::GillespieProblem) = p.time_domain[begin]
 
-function Plots.plot(sol::Solution,stride::Int=1)
+"Get final time from GillespieProblem."
+t₁(p::GillespieProblem) = p.time_domain[end]
+
+"""
+    plot(sol;stride,linecolor,label)
+    
+# Arguments
+- `sol::Solution`:  The structure returned by simulate.
+- `stride::Int`:    The number of steps to skip when plotting.
+- `linecolor`:      Specifies the color of each population (e.g. [:red :blue]).
+- `label`:          Specifies the name of each population (e.g. ["red" "blue"]).
+
+"""
+function Plots.plot(sol::Solution;stride::Int=1,linecolor=:black,label=nothing)
 
     plot(
         sol.time_array[1:stride:end],
         hcat(sol.population_array[1:stride:end]...)',
-        linecolor=:black,label=nothing
+        linecolor=linecolor,
+        label=label
         )
 
 end
 
-function Plots.plot!(sol::Solution,stride::Int=1)
+"""
+    plot!(sol;stride,linecolor,label)
+    
+# Arguments
+- `sol::Solution`:  The structure returned by simulate.
+- `stride::Int`:    The number of steps to skip when plotting.
+- `linecolor`:      Specifies the color of each population (e.g. [:red :blue]).
+- `label`:          Specifies the name of each population (e.g. ["red" "blue"]).
+
+"""
+function Plots.plot!(sol::Solution;stride::Int=1,linecolor=:black,label=nothing)
 
     plot!(
         sol.time_array[1:stride:end],
         hcat(sol.population_array[1:stride:end]...)',
-        linecolor=:black,label=nothing
+        linecolor=linecolor,
+        label=label
         )
 
 end
 
+"find_event(rates) computes a tuple of the population rates for simulate."
 function find_event(rates)
 
     # Get total to compute time to next event
@@ -87,17 +115,28 @@ function find_event(rates)
 
 end
 
-t₀(p::GillespieProblem) = p.time_domain[begin]
-t₁(p::GillespieProblem) = p.time_domain[end]
+function simulate_single_event(p::GillespieProblem)
 
+    rates = p.rn.compute_rates(t₀(p),p.initial_population,p.rn.rate_params)
+
+    if sum(rates) == 0.0
+        @warn "zero propagation!"
+        return Inf,nothing
+    end
+
+    τ, which_event = find_event(rates)
+
+    return τ, which_event
+
+end
+
+
+"""
+    simulate(p)
+
+Gillespie simulation with problem p.
+"""
 function simulate(p::GillespieProblem)
-
-    #=
-    max_events::S                   # Maximum number of events that can occur
-        initial_population::Vector{Int}
-        time_domain::Tuple{T,T}
-        reaction_network::R
-    =#
 
     # Initialize the elements that will fill the solution struct
     current_population = p.initial_population
@@ -153,7 +192,7 @@ function simulate(p::GillespieProblem)
 end
 
 simulate(mcp::MonteCarloProblem) = map(1:mcp.n) do i
-    run_gillespie(mcp.p)
+    simulate(mcp.p)
 end
 
 end
