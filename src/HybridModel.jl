@@ -19,16 +19,37 @@ This will create the structure HybridModel and simulate
 
 module HybridModel
 
-
-include("Gillespie.jl")
-
-using .Gillespie
-
 using DifferentialEquations
 
 export Model,Solution,DeterministicModel,StochasticModel,deterministic_step
 
 abstract type Model end
+abstract type AbstractReactionNetwork end
+
+struct ReactionMatrix{P} <: AbstractReactionNetwork
+    sto_mat::Matrix{Int}        # How does population change?
+    compute_rates::Function     # output should be same length as sto_mat
+    rate_params::P              # To be fed into compute_rates function
+end
+
+struct ReactionNetwork{P} <: AbstractReactionNetwork
+    sto_mat::Vector{Vector{Int}}    # How does population change?
+    compute_rates::Function         # output should be same length as sto_mat
+    rate_params::P                  # To be fed into compute_rates function
+end
+
+struct GillespieProblem{T<:Number,R<:AbstractReactionNetwork}
+    initial_population::Vector{Int}
+    time_domain::Tuple{T,T}
+    rn::R
+end
+
+struct StochasticModel{S<:Number,T<:Number,R<:AbstractReactionNetwork} <: Model
+    stochastic_population::Vector{Int}      # Population that is considered stochastic
+    deterministic_population::Vector{S}     # Population that is large enough to be deterministic
+    time_domain::Tuple{T,T}                 # Time to simulate
+    rn::R                                   # Reaction network that governs population evolution
+end
 
 struct DeterministicModel{P,T,U<:Number} <: Model
     ODEmodel::Function              # Deterministic version of the Model
@@ -40,26 +61,68 @@ struct DeterministicModel{P,T,U<:Number} <: Model
     in_stochastic_region::Bool      # Modification to ODE if in this region
 end
 
-struct StochasticModel <: Model
-    gp::GillespieProblem
-end
-
 mutable struct Solution{T<:Number,U}
-
     time_array::Vector{T}
     population_array::U
     patient_outcome::String
     stochastic_compartment::Vector{Int}
-
 end
 
 Solution(time,pop) = Solution([time],[pop],"Unknown",[3])
 
+"find_event(rates) computes a tuple of the population rates for simulate."
+function find_event(rates)
+
+    # Get total to compute time to next event
+    rate_total = sum(rates)
+
+    # Compute tau (time till next event)
+    τ = -log(rand())/rate_total
+
+    # Normalize rates to determine which event occurs
+    cum_rate = cumsum(rates./rate_total)
+
+    # Roll the dice
+    roll = rand()
+
+    # find out which individual process occurred
+    which_event = findfirst(x-> x >= roll,cum_rate)
+
+    return τ, which_event
+
+end
+
+"Get initial time from GillespieProblem."
+t₀(p::GillespieProblem) = p.time_domain[begin]
+
+"Get final time from GillespieProblem."
+t₁(p::GillespieProblem) = p.time_domain[end]
+
+function simulate_single_event(p::GillespieProblem)
+
+    rates = p.rn.compute_rates(t₀(p),p.initial_population,p.rn.rate_params)
+
+    if sum(rates) == 0.0
+        @warn "zero propagation!"
+        return Inf,nothing
+    end
+
+    τ, which_event = find_event(rates)
+
+    return τ, which_event
+
+end
+
 function deterministic_step(dm::Model)
+
+    dm.in_stochastic_region = true
 
     # Check to see if the tumor has entered the stochastic regime
     enter_stochastic_region(u,t,integrator) = dm.stochastic_threshold-u[3]
-    affect!(integrator) = terminate!(integrator)
+    affect!(integrator) = begin 
+        
+        terminate!(integrator)
+    end
     cb1 = ContinuousCallback(enter_stochastic_region,affect!,nothing,abstol=1e-9,save_positions=(false,false))
 
     # Check to see when the tumor exceeds some c*original size. We define 
