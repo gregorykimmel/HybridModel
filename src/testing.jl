@@ -1,26 +1,4 @@
-using DifferentialEquations, Plots
-
-"""
-    plot(sol;stride,linecolor,label)
-    
-# Arguments
-- `sol::Solution`:  The structure returned by simulate.
-- `stride::Int`:    The number of steps to skip when plotting.
-- `linecolor`:      Specifies the color of each population (e.g. [:red :blue]).
-- `label`:          Specifies the name of each population (e.g. ["red" "blue"]).
-
-"""
-function Plots.plot(sol::Solution;stride::Int=1,linecolor=:black,label=nothing, yaxis=:normal)
-
-    plot(
-        sol.time_array[1:stride:end],
-        hcat(sol.population_array[1:stride:end]...)',
-        linecolor=linecolor,
-        label=label,
-        yaxis=yaxis
-        )
-
-end
+using DifferentialEquations, Plots, Printf
 
 abstract type Model end
 abstract type AbstractReactionNetwork end
@@ -84,6 +62,42 @@ Solution(time::Number,pop) = Solution([time],[pop],"Unknown",false,Vector{Int}()
 Solution(time::Vector{<:Number},pop,is_stochastic::Bool) = Solution(time,pop,"Unknown",is_stochastic,[3])
 Solution(ode,is_stochastic::Bool) = Solution(ode.t,ode.u,"Unknown",is_stochastic,[3])
 
+function update_solution!(sol::Solution,ode)
+
+    push!(sol.time_array,ode.t[2:end]...)
+    push!(sol.population_array,ode.u[2:end]...)
+    
+
+end
+
+"""
+    plot(sol;stride,linecolor,label)
+    
+# Arguments
+- `sol::Solution`:  The structure returned by simulate.
+- `stride::Int`:    The number of steps to skip when plotting.
+- `linecolor`:      Specifies the color of each population (e.g. [:red :blue]).
+- `label`:          Specifies the name of each population (e.g. ["red" "blue"]).
+
+"""
+function Plots.plot(sol::Solution;stride::Int=1,linecolor=:black,label=nothing,
+    yaxis=:normal,legend=:bottomleft,small_value::Float64=1e-3)
+
+    t = sol.time_array[1:stride:end]
+    u = hcat(sol.population_array[1:stride:end]...)'
+    u[u.==0] .= small_value
+
+    plot(
+        t,
+        u,
+        linecolor=linecolor,
+        label=label,
+        legend=legend,
+        yaxis=yaxis
+        )
+
+end
+
 "find_event(rates) computes a tuple of the population rates for simulate."
 function find_event(rates)
 
@@ -121,40 +135,14 @@ function simulate_single_event(sm::StochasticModel)
 
 end
 
-### FIXME
-function round!(x::Vector)
-    x[3] = round(x[3])
-    return x
+### FIXME ###
+function round!(s::Solution)
+    s.population_array[end][s.stochastic_compartment] = round.(s.population_array[end][s.stochastic_compartment])
 end
 
-function deterministic_step(dm::Model)
+function printsol(s::Solution)
 
-    in_stochastic_region = false
-
-    saveat_callback = (length(dm.options.saveat)==0) ? false : true
-
-    # Check to see if the tumor has entered the stochastic regime
-    enter_stochastic_region(u,t,integrator) = dm.stochastic_threshold-u[3]
-    affect!(integrator) = begin
-        in_stochastic_region = true
-        terminate!(integrator)
-    end
-    cb1 = ContinuousCallback(enter_stochastic_region,affect!,nothing,save_positions=(false,saveat_callback))
-
-    # Check to see when the tumor exceeds some c*original size. We define 
-    # this as progression and assume the third compartment is the tumor compartment...
-    # Potentially we can use a component array instead so we don't need to track the compartment
-    progression(u,t,integrator) = u[3] - dm.progression_threshold*dm.initial_population[3]
-    affect2!(integrator) = terminate!(integrator)
-    cb2 = ContinuousCallback(progression,affect2!,save_positions=(false,saveat_callback))
-    cbset = CallbackSet(cb1,cb2)
-
-    prob = ODEProblem(dm.ODEmodel,dm.initial_population,dm.time_domain,dm.params,callback=cbset,
-                        abstol=dm.options.abstol,reltol=dm.options.reltol,saveat=dm.options.saveat)
-
-    odesol = solve(prob,Tsit5(),callback=cbset,abstol=1e-9,reltol=1e-6)
-
-    return odesol,in_stochastic_region
+    println("t = $(s.time_array[end]), B = $(s.population_array[end][3])")
 
 end
 
@@ -166,6 +154,7 @@ function deterministic_step(dm::Model,sol::Solution)
     enter_stochastic_region(u,t,integrator) = dm.stochastic_threshold-u[3]
     affect!(integrator) = begin
         sol.in_stochastic_region = true
+        sol.stochastic_compartment = [3]
         terminate!(integrator)
     end
     cb1 = ContinuousCallback(enter_stochastic_region,affect!,nothing,save_positions=(false,saveat_callback))
@@ -173,61 +162,113 @@ function deterministic_step(dm::Model,sol::Solution)
     # Check to see when the tumor exceeds some c*original size. We define 
     # this as progression and assume the third compartment is the tumor compartment...
     # Potentially we can use a component array instead so we don't need to track the compartment
-    progression(u,t,integrator) = u[3] - dm.progression_threshold*dm.initial_population[3]
-    affect2!(integrator) = terminate!(integrator)
+    progression(u,t,integrator) = dm.progression_threshold - u[3]
+    affect2!(integrator) = begin 
+        sol.patient_outcome = "progression"
+        terminate!(integrator)
+    end
+
     cb2 = ContinuousCallback(progression,affect2!,save_positions=(false,saveat_callback))
-    cbset = CallbackSet(cb1,cb2)
 
-    prob = ODEProblem(dm.ODEmodel,dm.initial_population,dm.time_domain,dm.params,callback=cbset,
-                        abstol=dm.options.abstol,reltol=dm.options.reltol,saveat=dm.options.saveat)
+    cb3 = nothing
+    progress_check = false
+	if progress_check
+		print_time(integrator) = @printf("t = %.2f, B = %.2f\n",integrator.t,integrator.u[3])
+		cb3 = PeriodicCallback(print_time, 1.0,save_positions=(false,false))
+	end
 
-    odesol = solve(prob,Tsit5(),callback=cbset,abstol=1e-9,reltol=1e-6)
+    # Group the callbacks and solve the ODE
+    cbset = CallbackSet(cb1,cb2,cb3)
 
-    push!(sol.population_array,odesol.u[end])
+    prob = ODEProblem(dm.ODEmodel,dm.initial_population,dm.time_domain,dm.params)
 
-    return sol
+    odesol = solve(prob,Tsit5(),callback=cbset,abstol=dm.options.abstol,reltol=dm.options.reltol,
+    saveat=dm.options.saveat)
+
+    return odesol
 
 end
 
 function simulate(dm::Model,rn::ReactionNetwork)
 
+    sol = Solution(dm.time_domain[1],dm.initial_population)
+
     # FIXME: We initially assume that the system is deterministic
-    odesol,in_stochastic_region = deterministic_step(dm)
+    odesol = deterministic_step(dm,sol)
 
-    sol = Solution(odesol,in_stochastic_region)
+    # Update the solution struct
+    update_solution!(sol,odesol)
 
-    if in_stochastic_region
-        round!(sol.population_array[end])
+    if sol.in_stochastic_region
+        round!(sol)
     end
+
+
     current_time = sol.time_array[end]
     current_pop = sol.population_array[end]
 
-    while current_time <= dm.time_domain[end]
+    while current_time < dm.time_domain[end] && sol.patient_outcome != "progression"
+    
+        # printsol(sol)
 
-        # Build the stochastic model
-        sm = StochasticModel(current_time,current_pop,rn)
+        if sol.in_stochastic_region
+            # Build the stochastic model
+            sm = StochasticModel(current_time,current_pop,rn)
 
-        # Get time to simulate forward and what occurs
-        τ, which_event = simulate_single_event(sm)
+            # Get time to simulate forward and what occurs
+            τ, which_event = simulate_single_event(sm)
 
-        newparams = (in_stochastic_region = sol.in_stochastic_region, modelparams = dm.params.modelparams)
+            newparams = (in_stochastic_region = sol.in_stochastic_region, modelparams = dm.params.modelparams)
 
-        # Simulate forward the deterministic components to the new time τ
-        dm_2 = DeterministicModel(dm.ODEmodel,
-                                    current_pop,
-                                    newparams,
-                                    dm.stochastic_threshold,
-                                    dm.progression_threshold,
-                                    (current_time,current_time+τ),
-                                    dm.options)
+            # Simulate forward the deterministic components to the new time τ
+            dm_2 = DeterministicModel(dm.ODEmodel,
+                                        current_pop,
+                                        newparams,
+                                        dm.stochastic_threshold,
+                                        dm.progression_threshold,
+                                        (current_time,current_time+τ),
+                                        dm.options)
 
-        sol = deterministic_step(dm_2,sol)
+            odesol = deterministic_step(dm_2,sol)
 
-        # solution with stochastic component and update time array
-        sol.population_array[end] += rn.sto_mat[which_event]
-        current_pop = sol.population_array[end]
-        current_time += τ
-        push!(sol.time_array,current_time)
+            # solution with stochastic component and update time array
+            # Update the solution struct
+            update_solution!(sol,odesol)
+            sol.population_array[end] += rn.sto_mat[which_event]
+            current_pop = sol.population_array[end]
+            current_time += τ
+
+        else
+
+            newparams = (in_stochastic_region = sol.in_stochastic_region, modelparams = dm.params.modelparams)
+
+            # Simulate forward the deterministic components to the new time τ
+            dm_2 = DeterministicModel(dm.ODEmodel,
+                                        current_pop,
+                                        newparams,
+                                        dm.stochastic_threshold,
+                                        dm.progression_threshold,
+                                        (current_time,dm.time_domain[end]),
+                                        dm.options)
+
+            odesol = deterministic_step(dm_2,sol)
+
+            # solution with stochastic component and update time array
+            # Update the solution struct
+            update_solution!(sol,odesol)
+
+            if sol.in_stochastic_region
+                round!(sol)
+            end
+
+            current_pop = sol.population_array[end]
+            current_time = sol.time_array[end]
+
+        end
+
+        if current_pop[3] > dm.stochastic_threshold
+            sol.in_stochastic_region = false
+        end
 
         if floor(current_pop[3]) == 0.0
             sol.patient_outcome = "cure"
