@@ -9,7 +9,7 @@ struct Options
     reltol::Float64
 end
 
-Options(;saveat=[],abstol=1e-6,reltol=1e-3) = Options(saveat,abstol,reltol)
+Options(;saveat=[],abstol=1e-6,reltol=1e-3,possible_stochastic_compartment=[]) = Options(saveat,abstol,reltol)
 
 struct ReactionMatrix{P} <: AbstractReactionNetwork
     sto_mat::Matrix{Int}        # How does population change?
@@ -36,16 +36,18 @@ struct DeterministicModel{P,T,U<:Number} <: Model
     stochastic_threshold::Number    # When to switch to/from the StochasticModel
     progression_threshold::Number   # A factor that determines progression
     time_domain::Tuple{U,U}         # Max length of simulation. (typically (0, tf) where tf is final time)
+    possible_stochastic_compartments::Vector{Int}
     options::Options
 end
 
-DeterministicModel(ode,init_pop,pars,sto_thres,prog_thres,time_domain) = begin
+DeterministicModel(ode,init_pop,pars,sto_thres,prog_thres,time_domain,possible_stochastic_compartments) = begin
     DeterministicModel( ode,
                         init_pop,
                         pars,
                         sto_thres,
                         prog_thres,
                         time_domain,
+                        possible_stochastic_compartments,
                         Options()
                         )
 end
@@ -151,13 +153,16 @@ function deterministic_step(dm::Model,sol::Solution)
     saveat_callback = (length(dm.options.saveat)==0) ? false : true
 
     # Check to see if the tumor has entered the stochastic regime
-    enter_stochastic_region(u,t,integrator) = dm.stochastic_threshold-u[3]
-    affect!(integrator) = begin
+    function enter_stochastic_region(out,u,t,integrator)
+        out .= dm.stochastic_threshold .- u[dm.possible_stochastic_compartments]
+    end
+    affect!(integrator,idx) = begin
         sol.in_stochastic_region = true
-        sol.stochastic_compartment = [3]
+        sol.stochastic_compartment = [dm.possible_stochastic_compartments[idx]...]#
         terminate!(integrator)
     end
-    cb1 = ContinuousCallback(enter_stochastic_region,affect!,nothing,save_positions=(false,saveat_callback))
+    cb1 = VectorContinuousCallback(enter_stochastic_region,affect!,nothing,
+    length(dm.possible_stochastic_compartments),save_positions=(false,saveat_callback))
 
     # Check to see when the tumor exceeds some c*original size. We define 
     # this as progression and assume the third compartment is the tumor compartment...
@@ -203,7 +208,6 @@ function simulate(dm::Model,rn::ReactionNetwork)
         round!(sol)
     end
 
-
     current_time = sol.time_array[end]
     current_pop = sol.population_array[end]
 
@@ -227,6 +231,7 @@ function simulate(dm::Model,rn::ReactionNetwork)
                                         dm.stochastic_threshold,
                                         dm.progression_threshold,
                                         (current_time,current_time+τ),
+                                        dm.possible_stochastic_compartments,
                                         dm.options)
 
             odesol = deterministic_step(dm_2,sol)
@@ -249,6 +254,7 @@ function simulate(dm::Model,rn::ReactionNetwork)
                                         dm.stochastic_threshold,
                                         dm.progression_threshold,
                                         (current_time,dm.time_domain[end]),
+                                        dm.possible_stochastic_compartments,
                                         dm.options)
 
             odesol = deterministic_step(dm_2,sol)
